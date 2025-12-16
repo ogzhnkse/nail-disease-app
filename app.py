@@ -9,11 +9,24 @@ import pandas as pd
 
 # 1. Custom Model Tanımı (Aynen kalıyor)
 class CascadeNailModel(tf.keras.Model):
-    def __init__(self, binary_model=None, multiclass_model=None, threshold=0.63):
-        super().__init__()
+    def __init__(self, binary_model=None, multiclass_model=None, threshold=0.63, **kwargs):
+        # **kwargs ekledik ki Keras'ın gönderdiği 'name' vb. parametreleri kabul etsin
+        super().__init__(**kwargs)
         self.binary_model = binary_model
         self.multiclass_model = multiclass_model
         self.threshold = threshold
+
+    def get_config(self):
+        # Modeli kaydederken/yüklerken parametreleri hatırlaması için gerekli
+        config = super().get_config()
+        config.update({
+            "threshold": self.threshold,
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
 
     def call(self, inputs, training=False):
         binary_probs = self.binary_model(inputs, training=False)
@@ -22,7 +35,6 @@ class CascadeNailModel(tf.keras.Model):
         multiclass_probs = self.multiclass_model(inputs, training=False)
         predicted_classes = tf.argmax(multiclass_probs, axis=1)
         return tf.where(mask, predicted_classes, tf.constant(-1, dtype=tf.int64))
-
 
 # 2. Sayfa Ayarları
 st.set_page_config(
