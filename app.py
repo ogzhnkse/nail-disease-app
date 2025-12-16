@@ -149,12 +149,35 @@ def load_and_prepare(img_bytes):
 def predict_pipeline(img_arr, healthy_threshold):
     if model is None: return None
     
-    preds = model.predict(img_arr)[0]
-    class_probs = {CLASS_NAMES_LOWER[i]: float(preds[i]) for i in range(len(CLASS_NAMES_LOWER))}
+    # --- DÜZELTME BAŞLANGIÇ ---
+    # Hatayı engellemek için ana modelin .predict() fonksiyonunu değil,
+    # içindeki alt modellerin .predict() fonksiyonlarını kullanıyoruz.
+    # Böylece tek bir sayı değil, tüm olasılıkları alabiliriz.
     
-    healthy_prob = class_probs.get("healthy", 0.0)
-    harmful_prob = 1.0 - healthy_prob
+    # 1. Binary (İkili) Modelden Sonuç Al (Hasta mı / Değil mi?)
+    binary_preds = model.binary_model.predict(img_arr, verbose=0)[0]
+    # Genelde binary modelde [Sağlıklı, Hasta] veya [Sınıf0, Sınıf1] sırası vardır.
+    # Burada 1. indexin 'Zararlı/Hasta' olma olasılığı olduğunu varsayıyoruz.
+    harmful_prob = float(binary_preds[1])
+    healthy_prob = 1.0 - harmful_prob
 
+    # 2. Multiclass (Çoklu) Modelden Sonuç Al (Hangi Hastalık?)
+    multi_preds = model.multiclass_model.predict(img_arr, verbose=0)[0]
+    
+    # Sınıf isimleri ile olasılıkları eşleştiriyoruz
+    # multi_preds artık bir liste olduğu için IndexError vermeyecek.
+    class_probs = {}
+    if len(multi_preds) == len(CLASS_NAMES_LOWER):
+        class_probs = {CLASS_NAMES_LOWER[i]: float(multi_preds[i]) for i in range(len(CLASS_NAMES_LOWER))}
+    else:
+        # Eğer modelin çıkış sayısı ile sınıf listesi tutmazsa patlamaması için önlem:
+        st.warning(f"Sınıf sayısı uyuşmazlığı! Model: {len(multi_preds)}, Liste: {len(CLASS_NAMES_LOWER)}")
+        # Geçici çözüm olarak indeksleri kullan
+        class_probs = {str(i): float(multi_preds[i]) for i in range(len(multi_preds))}
+        
+    # --- DÜZELTME BİTİŞ ---
+
+    # Mantık Akışı (Burası aynı kalıyor, sadece değişkenler güncellendi)
     if healthy_prob >= healthy_threshold:
         return {
             "status": "Healthy",
@@ -166,9 +189,16 @@ def predict_pipeline(img_arr, healthy_threshold):
             "class_probs": class_probs
         }
     
+    # Sağlıklı değilse, en yüksek olasılıklı hastalığı bul
     non_healthy = {k: v for k, v in class_probs.items() if k != "healthy"}
-    best_class = max(non_healthy, key=non_healthy.get)
-    best_prob = non_healthy[best_class]
+    
+    if non_healthy:
+        best_class = max(non_healthy, key=non_healthy.get)
+        best_prob = non_healthy[best_class]
+    else:
+        # Eğer listede sadece healthy varsa (teknik hata durumunda)
+        best_class = "Bilinmiyor"
+        best_prob = 0.0
     
     systemic_map = SYSTEMIC_RISKS.get(best_class, {})
     systemic_results = {k: best_prob * v for k, v in systemic_map.items()}
@@ -182,7 +212,6 @@ def predict_pipeline(img_arr, healthy_threshold):
         "systemic": systemic_results,
         "class_probs": class_probs
     }
-
 # --------------------------------------------------------
 # 6. Arayüz Mantığı
 # --------------------------------------------------------
