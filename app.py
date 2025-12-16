@@ -11,7 +11,7 @@ import pandas as pd
 # --------------------------------------------------------
 class CascadeNailModel(tf.keras.Model):
     def __init__(self, binary_model=None, multiclass_model=None, threshold=0.63, **kwargs):
-        # 🛠️ DÜZELTME: 'dtype' parametresi gelirse temizliyoruz (Hata önleyici)
+        # 🛠️ DÜZELTME 1: 'dtype' parametresi gelirse temizliyoruz
         if 'dtype' in kwargs:
             kwargs.pop('dtype')
             
@@ -32,13 +32,29 @@ class CascadeNailModel(tf.keras.Model):
         return cls(**config)
 
     def call(self, inputs, training=False):
+        # 🛠️ DÜZELTME 2 (KRİTİK): Yükleme sırasında modeller henüz None olabilir.
+        # Bu durumda hata vermemek için geçici (dummy) bir çıktı döndürüyoruz.
+        # Bu sadece "load_model" sırasındaki build aşamasını atlatmak içindir.
+        if self.binary_model is None or self.multiclass_model is None:
+            # Batch size kadar -1 içeren bir tensör döndür
+            # Bu sayede Keras "Tamam şekiller uyuyor" der ve yüklemeye devam eder.
+            batch_size = tf.shape(inputs)[0]
+            return tf.fill([batch_size], tf.constant(-1, dtype=tf.int64))
+
+        # --- Normal Akış ---
         binary_probs = self.binary_model(inputs, training=False)
         harmful_prob = binary_probs[:, 1]
+        
         mask = harmful_prob >= self.threshold
+        
         multiclass_probs = self.multiclass_model(inputs, training=False)
         predicted_classes = tf.argmax(multiclass_probs, axis=1)
-        return tf.where(mask, predicted_classes, tf.constant(-1, dtype=tf.int64))
-
+        
+        return tf.where(
+            mask,
+            predicted_classes,
+            tf.constant(-1, dtype=tf.int64)
+        )
 # --------------------------------------------------------
 # 2. Sayfa Ayarları ve Başlık
 # --------------------------------------------------------
