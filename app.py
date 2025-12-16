@@ -51,6 +51,15 @@ st.set_page_config(
 st.title("🧬 Tırnak Hastalığı Analiz Sistemi")
 st.write("DenseNet121 tabanlı: Healthy vs Disease + Hastalık Tipi + Sistemik Risk Analizi")
 
+# --- DEBUG BAŞLANGIÇ ---
+import os
+st.write("📂 Mevcut Klasördeki Dosyalar:")
+st.write(os.listdir('.')) # Ana dizindeki dosyaları ekrana yazar
+# --- DEBUG BİTİŞ ---
+
+@st.cache_resource
+def load_model():
+    # ... (kodun geri kalanı aynı)
 
 # 3. Model Yükleme (Göreceli Yol Kullanıldı)
 @st.cache_resource  # Modeli önbelleğe alır, hız kazandırır
