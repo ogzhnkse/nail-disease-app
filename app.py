@@ -10,14 +10,20 @@ import pandas as pd
 # 1. Custom Model Tanımı (Aynen kalıyor)
 class CascadeNailModel(tf.keras.Model):
     def __init__(self, binary_model=None, multiclass_model=None, threshold=0.63, **kwargs):
-        # **kwargs ekledik ki Keras'ın gönderdiği 'name' vb. parametreleri kabul etsin
+        # 🛠️ DÜZELTME: 'dtype' parametresi string (örn: "float32") olarak gelirse
+        # Keras'ın bu versiyonu hata veriyor. Bu yüzden onu kwargs içinden siliyoruz.
+        # Model zaten varsayılan olarak float32 çalışacaktır.
+        if 'dtype' in kwargs:
+            kwargs.pop('dtype')
+            
+        # **kwargs sayesinde diğer gerekli parametreler (name vs.) üst sınıfa iletiliyor
         super().__init__(**kwargs)
+        
         self.binary_model = binary_model
         self.multiclass_model = multiclass_model
         self.threshold = threshold
 
     def get_config(self):
-        # Modeli kaydederken/yüklerken parametreleri hatırlaması için gerekli
         config = super().get_config()
         config.update({
             "threshold": self.threshold,
@@ -35,7 +41,6 @@ class CascadeNailModel(tf.keras.Model):
         multiclass_probs = self.multiclass_model(inputs, training=False)
         predicted_classes = tf.argmax(multiclass_probs, axis=1)
         return tf.where(mask, predicted_classes, tf.constant(-1, dtype=tf.int64))
-
 # 2. Sayfa Ayarları
 st.set_page_config(
     page_title="Nail Disease Detection",
