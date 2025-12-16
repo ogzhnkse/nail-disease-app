@@ -8,7 +8,7 @@
 
 \f0\fs24 \cf0 \expnd0\expndtw0\kerning0
 \outl0\strokewidth0 \strokec2 streamlit \
-tensorflow \
+tensorflow-cpu \
 numpy \
 pandas \
 matplotlib}
