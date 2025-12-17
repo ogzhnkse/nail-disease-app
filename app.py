@@ -14,7 +14,7 @@ st.title("🧬 Tırnak Hastalığı Analiz Sistemi")
 st.write("DenseNet121 tabanlı: Healthy vs Disease + Hastalık Tipi + Sistemik Risk Analizi")
 
 # --------------------------------------------------------
-# 2. Özel Model Sınıfı (Keras 3 Uyumlu)
+# 2. Özel Model Sınıfı
 # --------------------------------------------------------
 @tf.keras.utils.register_keras_serializable()
 class CascadeNailModel(tf.keras.Model):
@@ -34,131 +34,134 @@ class CascadeNailModel(tf.keras.Model):
         return cls(**config)
 
     def call(self, inputs, training=False):
-        # Keras 3'te call metodu yükleme sırasında kritik değildir
-        # ama yine de mantığı koruyoruz
+        # Yükleme sırasında hata vermemesi için
         if self.binary_model is None or self.multiclass_model is None:
-             return inputs # Yükleme sırasında hata vermemesi için
-             
-        binary_probs = self.binary_model(inputs, training=False)
-        harmful_prob = binary_probs[:, 1]
-        mask = harmful_prob >= self.threshold
-        multiclass_probs = self.multiclass_model(inputs, training=False)
-        predicted_classes = tf.argmax(multiclass_probs, axis=1)
-        return tf.where(mask, predicted_classes, tf.constant(-1, dtype=tf.int64))
+             return inputs 
+        return inputs # Pipeline'ı manuel yöneteceğiz
 
 # --------------------------------------------------------
-# 3. Modeli Yükle (Keras 3 Yöntemi)
+# 3. Modeli Yükle ve Zorla Uyandır
 # --------------------------------------------------------
 @st.cache_resource
 def load_full_model():
-    # GitHub'daki dosya adı
     model_path = "ikili_sistem.keras"
-    
     if not os.path.exists(model_path):
         st.error(f"❌ Model dosyası ({model_path}) bulunamadı!")
         return None
 
     try:
-        # Keras 3'te custom_objects tanımlamak bazen gereksizdir ama garanti olsun
+        # Modeli Yükle
         model = tf.keras.models.load_model(model_path, compile=False)
+        
+        # 🛠️ MODELİ UYANDIRMA (BUILD)
+        # Modele boş bir veri verip çalıştırıyoruz ki içindeki katmanlar oluşsun.
+        try:
+            dummy = tf.zeros((1, 224, 224, 3))
+            model(dummy)
+        except:
+            pass # Hata verebilir ama yine de değişkenleri tetikler
+            
         return model
     except Exception as e:
-        # Eğer standart yükleme başarısız olursa custom object ile dene
-        try:
-            model = tf.keras.models.load_model(
-                model_path, 
-                compile=False,
-                custom_objects={"CascadeNailModel": CascadeNailModel}
-            )
-            return model
-        except Exception as e2:
-            st.error(f"Model yüklenemedi: {e2}")
-            return None
+        st.error(f"Model yüklenemedi: {e}")
+        return None
 
 model = load_full_model()
 
 # --------------------------------------------------------
-# 4. Tahmin Pipeline (Model İçine Girme)
+# 4. Tahmin Pipeline (Derin Tarama Modu)
 # --------------------------------------------------------
 CLASS_NAMES = sorted(["acral_lentiginous_melanoma", "blue_finger", "clubbing", "healthy", "onychomycosis", "pitting", "psoriasis"])
 CLASS_NAMES_LOWER = [c.lower() for c in CLASS_NAMES]
 
-# --------------------------------------------------------
-# 4. Tahmin Pipeline (DEBUG VERSİYON)
-# --------------------------------------------------------
 def predict_pipeline(img_arr, healthy_threshold):
     if model is None: return None
     
     b_model = None
     m_model = None
 
-    # --- DEBUG: MODELİN İÇİNİ GÖSTER ---
-    # Bu kısım ekranda modelin katmanlarını listeleyecek, böylece neyin ne olduğunu göreceğiz.
-    with st.expander("🛠️ MODEL YAPISI (DEBUG)", expanded=True):
-        st.write("Model içindeki katmanlar taranıyor...")
-        
-        layers = model.layers if hasattr(model, 'layers') else []
-        for i, layer in enumerate(layers):
-            try:
-                # Çıktı boyutunu bulmaya çalış
-                shape = layer.output_shape
-                if isinstance(shape, list): shape = shape[0]
-                out_dim = shape[-1] if shape else "Bilinmiyor"
-                
-                st.write(f"🔹 **Index {i}:** `{layer.name}` | Çıktı: `{out_dim}` | Tip: `{type(layer).__name__}`")
-                
-                # OTOMATİK TESPİT MANTIĞI (GÜNCELLENDİ)
-                # Binary model genelde 1 (sigmoid) veya 2 (softmax) çıkışlıdır.
-                if (out_dim == 1 or out_dim == 2) and b_model is None:
-                    # Conv katmanlarını (örneğin 1024 filtreli) karıştırmamak için isme de bakıyoruz
-                    # Eğer DenseNet veya Model ise al
-                    if "model" in layer.name or "functional" in layer.name.lower() or isinstance(layer, tf.keras.Model):
-                        b_model = layer
-                        st.success(f"   ✅ Binary Model Adayı Bulundu! (Index {i})")
-                
-                # Multiclass model genelde 2'den büyüktür (Sizde 7 sınıf var)
-                elif (out_dim == 7) and m_model is None:
-                    m_model = layer
-                    st.success(f"   ✅ Multiclass Model Adayı Bulundu! (Index {i})")
-                    
-            except Exception as e:
-                st.write(f"Index {i} okunamadı: {e}")
+    # --- 🔍 DERİN TARAMA (DEEP SCAN) ---
+    # Modelin 'layers' listesi boşsa bile, Python hafızasında bu nesneler saklanıyordur.
+    # Gizli niteliklere (_layers, _self_tracked_trackables) bakacağız.
+    
+    candidates = []
+    
+    # Modelin içindeki tüm özellikleri tara
+    # Keras 3 modelleri parçaları '_self_tracked_trackables' veya 'layers' içinde saklar.
+    search_list = []
+    
+    if hasattr(model, 'layers'): search_list.extend(model.layers)
+    if hasattr(model, 'submodules'): search_list.extend(model.submodules)
+    if hasattr(model, '_layers'): search_list.extend(model._layers)
+    if hasattr(model, '_self_tracked_trackables'): search_list.extend(model._self_tracked_trackables)
+    
+    # Tekrarları temizle
+    search_list = list(set(search_list))
 
-    # --- HATA YÖNETİMİ VE FALLBACK ---
-    # Eğer otomatik bulamazsa, KÖRLEMESİNE ilk iki modeli alalım (Genelde sırası bellidir)
-    if b_model is None and len(layers) >= 1:
-        st.warning("⚠️ Otomatik tespit başarısız, Index 0 zorla Binary olarak atanıyor.")
-        b_model = layers[0]
+    with st.expander("🛠️ MODEL İÇERİĞİ (DEBUG)", expanded=False):
+        st.write(f"Toplam {len(search_list)} adet parça tarandı.")
         
-    if m_model is None and len(layers) >= 2:
-        st.warning("⚠️ Otomatik tespit başarısız, Index 1 zorla Multiclass olarak atanıyor.")
-        m_model = layers[1]
+        for item in search_list:
+            # Sadece ağırlığı olan katman/modelleri al
+            if (isinstance(item, tf.keras.Model) or hasattr(item, 'weights')) and item is not model:
+                try:
+                    # Çıktı boyutunu tahmin et
+                    out_dim = 0
+                    if hasattr(item, 'output_shape'):
+                        shape = item.output_shape
+                        if isinstance(shape, list): shape = shape[0]
+                        out_dim = shape[-1]
+                    elif hasattr(item, 'layers') and len(item.layers) > 0:
+                        # Eğer modelse son katmanına bak
+                        last_shape = item.layers[-1].output_shape
+                        if isinstance(last_shape, list): last_shape = last_shape[0]
+                        out_dim = last_shape[-1]
+                    
+                    if out_dim > 0:
+                        st.write(f"🔹 Parça: `{item.name}` | Çıktı: `{out_dim}`")
+                        
+                        # Binary (1 veya 2 çıkışlı)
+                        if (out_dim == 1 or out_dim == 2) and b_model is None:
+                            b_model = item
+                            st.success(f"   ✅ Binary Bulundu: {item.name}")
+                        
+                        # Multi (7 çıkışlı)
+                        elif (out_dim == 7) and m_model is None:
+                            m_model = item
+                            st.success(f"   ✅ Multi Bulundu: {item.name}")
+                            
+                except:
+                    pass
+
+    # BULUNAMADIYSA FALLBACK (İsimle Ara)
+    if b_model is None and hasattr(model, 'binary_model') and model.binary_model:
+        b_model = model.binary_model
+    if m_model is None and hasattr(model, 'multiclass_model') and model.multiclass_model:
+        m_model = model.multiclass_model
 
     if b_model is None or m_model is None:
-        st.error("❌ Kritik Hata: Model parçaları ayrıştırılamadı. Lütfen yukarıdaki DEBUG listesini kontrol edin.")
+        st.error("❌ Kritik Hata: Model parçaları derin taramada bile bulunamadı. Dosya bozuk veya uyumsuz olabilir.")
         return None
 
     # --- TAHMİN ---
     try:
-        # Binary Tahmin
+        # Binary
         b_preds = b_model(img_arr, training=False).numpy()[0]
-        
-        # Çıktı 1 tane ise (Sigmoid) -> [1-p, p] yap
-        if len(b_preds) == 1:
+        if len(b_preds) == 1: # Sigmoid
             harmful_prob = float(b_preds[0])
             healthy_prob = 1.0 - harmful_prob
-        else: # Çıktı 2 tane ise (Softmax) -> [p0, p1]
+        else: # Softmax
             harmful_prob = float(b_preds[1])
-            healthy_prob = float(b_preds[0]) # veya 1-harmful
+            healthy_prob = float(b_preds[0])
 
-        # Multi Tahmin
+        # Multi
         m_preds = m_model(img_arr, training=False).numpy()[0]
-    
+        
     except Exception as e:
-        st.error(f"Tahmin sırasında hata oluştu: {e}")
+        st.error(f"Tahmin hatası: {e}")
         return None
 
-    # --- SONUÇ HAZIRLAMA ---
+    # --- SONUÇ ---
     class_probs = {}
     if len(m_preds) == len(CLASS_NAMES_LOWER):
         class_probs = {CLASS_NAMES_LOWER[i]: float(m_preds[i]) for i in range(len(CLASS_NAMES_LOWER))}
@@ -183,6 +186,7 @@ def predict_pipeline(img_arr, healthy_threshold):
     systemic_results = {k: best_prob * v for k, v in SYSTEMIC_RISKS.get(best_class, {}).items()}
 
     return {"status": "Harmful", "healthy_probability": healthy_prob, "harmful_probability": harmful_prob, "detailed_class": best_class, "detailed_prob": best_prob, "systemic": systemic_results, "class_probs": class_probs}
+
 # --------------------------------------------------------
 # 5. Arayüz
 # --------------------------------------------------------
