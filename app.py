@@ -14,9 +14,10 @@ st.title("🧬 Tırnak Hastalığı Analiz Sistemi")
 st.write("DenseNet121 tabanlı: Healthy vs Disease + Hastalık Tipi + Sistemik Risk Analizi")
 
 # --------------------------------------------------------
-# 2. Özel Model Sınıfı
+# 2. Özel Model Sınıfı (Kayıtlı ve Seri Hale Getirilebilir)
 # --------------------------------------------------------
-@tf.keras.utils.register_keras_serializable()
+# Bu decorator, Keras'a bu sınıfın güvenli olduğunu söyler
+@tf.keras.utils.register_keras_serializable(package="Custom", name="CascadeNailModel")
 class CascadeNailModel(tf.keras.Model):
     def __init__(self, binary_model=None, multiclass_model=None, threshold=0.63, **kwargs):
         super().__init__(**kwargs)
@@ -31,16 +32,18 @@ class CascadeNailModel(tf.keras.Model):
 
     @classmethod
     def from_config(cls, config):
+        # Config içindeki gereksiz parametreleri temizle (Hata önleyici)
+        if 'dtype' in config: del config['dtype']
+        if 'trainable' in config: del config['trainable']
         return cls(**config)
 
     def call(self, inputs, training=False):
-        # Yükleme sırasında hata vermemesi için
         if self.binary_model is None or self.multiclass_model is None:
              return inputs 
-        return inputs # Pipeline'ı manuel yöneteceğiz
+        return inputs 
 
 # --------------------------------------------------------
-# 3. Modeli Yükle ve Zorla Uyandır
+# 3. Modeli Yükle (SCOPE YÖNTEMİ - KİLİT AÇICI)
 # --------------------------------------------------------
 @st.cache_resource
 def load_full_model():
@@ -50,26 +53,28 @@ def load_full_model():
         return None
 
     try:
-        # Modeli Yükle
-        model = tf.keras.models.load_model(model_path, compile=False)
+        # 🔑 İŞTE SİHİRLİ KISIM: 'custom_object_scope'
+        # Bu, yükleme işlemi sırasında "CascadeNailModel" ismini zorla bizim sınıfımıza eşler.
+        with tf.keras.utils.custom_object_scope({'CascadeNailModel': CascadeNailModel}):
+            model = tf.keras.models.load_model(model_path, compile=False)
         
-        # 🛠️ MODELİ UYANDIRMA (BUILD)
-        # Modele boş bir veri verip çalıştırıyoruz ki içindeki katmanlar oluşsun.
+        # 🛠️ UYANDIRMA SERVİSİ (BUILD)
         try:
             dummy = tf.zeros((1, 224, 224, 3))
             model(dummy)
         except:
-            pass # Hata verebilir ama yine de değişkenleri tetikler
+            pass
             
         return model
     except Exception as e:
-        st.error(f"Model yüklenemedi: {e}")
+        # Eğer yukarıdaki çalışmazsa, hatayı detaylı göster
+        st.error(f"Kilit açma hatası: {e}")
         return None
 
 model = load_full_model()
 
 # --------------------------------------------------------
-# 4. Tahmin Pipeline (Derin Tarama Modu)
+# 4. Tahmin Pipeline (Derin Tarama)
 # --------------------------------------------------------
 CLASS_NAMES = sorted(["acral_lentiginous_melanoma", "blue_finger", "clubbing", "healthy", "onychomycosis", "pitting", "psoriasis"])
 CLASS_NAMES_LOWER = [c.lower() for c in CLASS_NAMES]
@@ -80,67 +85,62 @@ def predict_pipeline(img_arr, healthy_threshold):
     b_model = None
     m_model = None
 
-    # --- 🔍 DERİN TARAMA (DEEP SCAN) ---
-    # Modelin 'layers' listesi boşsa bile, Python hafızasında bu nesneler saklanıyordur.
-    # Gizli niteliklere (_layers, _self_tracked_trackables) bakacağız.
-    
-    candidates = []
-    
-    # Modelin içindeki tüm özellikleri tara
-    # Keras 3 modelleri parçaları '_self_tracked_trackables' veya 'layers' içinde saklar.
+    # --- 🔍 PARÇALARI BUL (DEEP SCAN) ---
     search_list = []
     
+    # Modelin içindeki olası saklanma yerlerine bak
     if hasattr(model, 'layers'): search_list.extend(model.layers)
-    if hasattr(model, 'submodules'): search_list.extend(model.submodules)
-    if hasattr(model, '_layers'): search_list.extend(model._layers)
-    if hasattr(model, '_self_tracked_trackables'): search_list.extend(model._self_tracked_trackables)
+    if hasattr(model, 'binary_model') and model.binary_model: search_list.append(model.binary_model)
+    if hasattr(model, 'multiclass_model') and model.multiclass_model: search_list.append(model.multiclass_model)
     
-    # Tekrarları temizle
+    # Keras 3 gizli değişkenleri
+    # Python'un 'dir' komutuyla tüm nitelikleri tara
+    for attr in dir(model):
+        if attr.startswith("_") or attr == "layers": continue
+        try:
+            val = getattr(model, attr)
+            if isinstance(val, tf.keras.Model) or (isinstance(val, tf.keras.layers.Layer) and hasattr(val, 'layers')):
+                search_list.append(val)
+        except: pass
+
+    # Listeyi temizle
     search_list = list(set(search_list))
 
-    with st.expander("🛠️ MODEL İÇERİĞİ (DEBUG)", expanded=False):
-        st.write(f"Toplam {len(search_list)} adet parça tarandı.")
-        
+    with st.expander("🛠️ MODEL PARÇALARI (DEBUG)", expanded=False):
         for item in search_list:
-            # Sadece ağırlığı olan katman/modelleri al
-            if (isinstance(item, tf.keras.Model) or hasattr(item, 'weights')) and item is not model:
+            if hasattr(item, 'output_shape') or hasattr(item, 'layers'):
                 try:
-                    # Çıktı boyutunu tahmin et
+                    # Çıktı boyutunu bul
                     out_dim = 0
                     if hasattr(item, 'output_shape'):
                         shape = item.output_shape
                         if isinstance(shape, list): shape = shape[0]
-                        out_dim = shape[-1]
+                        out_dim = shape[-1] if shape else 0
                     elif hasattr(item, 'layers') and len(item.layers) > 0:
-                        # Eğer modelse son katmanına bak
                         last_shape = item.layers[-1].output_shape
                         if isinstance(last_shape, list): last_shape = last_shape[0]
-                        out_dim = last_shape[-1]
+                        out_dim = last_shape[-1] if last_shape else 0
                     
                     if out_dim > 0:
-                        st.write(f"🔹 Parça: `{item.name}` | Çıktı: `{out_dim}`")
+                        st.write(f"🔹 `{item.name}` -> Çıktı: `{out_dim}`")
                         
-                        # Binary (1 veya 2 çıkışlı)
+                        # Binary: 1 (sigmoid) veya 2 (softmax)
                         if (out_dim == 1 or out_dim == 2) and b_model is None:
                             b_model = item
-                            st.success(f"   ✅ Binary Bulundu: {item.name}")
+                            st.success(f"   ✅ Binary Atandı!")
                         
-                        # Multi (7 çıkışlı)
+                        # Multi: 7 sınıf
                         elif (out_dim == 7) and m_model is None:
                             m_model = item
-                            st.success(f"   ✅ Multi Bulundu: {item.name}")
-                            
-                except:
-                    pass
+                            st.success(f"   ✅ Multi Atandı!")
+                except: pass
 
-    # BULUNAMADIYSA FALLBACK (İsimle Ara)
-    if b_model is None and hasattr(model, 'binary_model') and model.binary_model:
-        b_model = model.binary_model
-    if m_model is None and hasattr(model, 'multiclass_model') and model.multiclass_model:
-        m_model = model.multiclass_model
+    # FALLBACK
+    if b_model is None and len(search_list) >= 1: b_model = search_list[0]
+    if m_model is None and len(search_list) >= 2: m_model = search_list[1]
 
     if b_model is None or m_model is None:
-        st.error("❌ Kritik Hata: Model parçaları derin taramada bile bulunamadı. Dosya bozuk veya uyumsuz olabilir.")
+        st.error("❌ Kritik Hata: Parçalar bulunamadı.")
         return None
 
     # --- TAHMİN ---
