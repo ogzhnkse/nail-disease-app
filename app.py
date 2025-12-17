@@ -83,63 +83,87 @@ model = load_full_model()
 CLASS_NAMES = sorted(["acral_lentiginous_melanoma", "blue_finger", "clubbing", "healthy", "onychomycosis", "pitting", "psoriasis"])
 CLASS_NAMES_LOWER = [c.lower() for c in CLASS_NAMES]
 
+# --------------------------------------------------------
+# 4. Tahmin Pipeline (DEBUG VERSİYON)
+# --------------------------------------------------------
 def predict_pipeline(img_arr, healthy_threshold):
     if model is None: return None
     
-    # 🕵️‍♂️ Modelin İçindeki Katmanları Bulma (Canlı Cerrahi)
-    # Model yüklendiyse, içindeki 'binary' ve 'multi' katmanlarını/modellerini bulmalıyız.
-    # İsimler kaybolmuş olabilir, bu yüzden çıktı boyutuna göre tahmin yapacağız.
-    
     b_model = None
     m_model = None
-    
-    # Modelin "submodules" veya "layers" özelliklerini tarıyoruz
-    # Keras 3'te model parçaları bazen layer listesinde, bazen submodules içinde olur
-    candidates = []
-    
-    # 1. Doğrudan niteliklere bak
-    if hasattr(model, 'binary_model') and model.binary_model is not None:
-        b_model = model.binary_model
-    if hasattr(model, 'multiclass_model') and model.multiclass_model is not None:
-        m_model = model.multiclass_model
+
+    # --- DEBUG: MODELİN İÇİNİ GÖSTER ---
+    # Bu kısım ekranda modelin katmanlarını listeleyecek, böylece neyin ne olduğunu göreceğiz.
+    with st.expander("🛠️ MODEL YAPISI (DEBUG)", expanded=True):
+        st.write("Model içindeki katmanlar taranıyor...")
         
-    # 2. Bulunamadıysa Katmanları Tara (Output Shape'e göre)
-    if b_model is None or m_model is None:
-        # Tüm alt katmanları/modelleri topla
-        all_layers = model.layers if hasattr(model, 'layers') else []
-        
-        for layer in all_layers:
-            # Sadece ağırlığı olan katmanlara/modellere bak
-            if hasattr(layer, 'output_shape'):
+        layers = model.layers if hasattr(model, 'layers') else []
+        for i, layer in enumerate(layers):
+            try:
+                # Çıktı boyutunu bulmaya çalış
                 shape = layer.output_shape
                 if isinstance(shape, list): shape = shape[0]
-                # Son boyutu al (Sınıf Sayısı)
-                if shape and len(shape) > 0:
-                    output_dim = shape[-1]
-                    if output_dim == 2: b_model = layer
-                    elif output_dim > 2: m_model = layer
+                out_dim = shape[-1] if shape else "Bilinmiyor"
+                
+                st.write(f"🔹 **Index {i}:** `{layer.name}` | Çıktı: `{out_dim}` | Tip: `{type(layer).__name__}`")
+                
+                # OTOMATİK TESPİT MANTIĞI (GÜNCELLENDİ)
+                # Binary model genelde 1 (sigmoid) veya 2 (softmax) çıkışlıdır.
+                if (out_dim == 1 or out_dim == 2) and b_model is None:
+                    # Conv katmanlarını (örneğin 1024 filtreli) karıştırmamak için isme de bakıyoruz
+                    # Eğer DenseNet veya Model ise al
+                    if "model" in layer.name or "functional" in layer.name.lower() or isinstance(layer, tf.keras.Model):
+                        b_model = layer
+                        st.success(f"   ✅ Binary Model Adayı Bulundu! (Index {i})")
+                
+                # Multiclass model genelde 2'den büyüktür (Sizde 7 sınıf var)
+                elif (out_dim == 7) and m_model is None:
+                    m_model = layer
+                    st.success(f"   ✅ Multiclass Model Adayı Bulundu! (Index {i})")
+                    
+            except Exception as e:
+                st.write(f"Index {i} okunamadı: {e}")
 
-    # HATA KONTROLÜ
-    if b_model is None:
-        st.error("Model yüklendi ama 'Binary' (2 sınıflı) parça bulunamadı.")
+    # --- HATA YÖNETİMİ VE FALLBACK ---
+    # Eğer otomatik bulamazsa, KÖRLEMESİNE ilk iki modeli alalım (Genelde sırası bellidir)
+    if b_model is None and len(layers) >= 1:
+        st.warning("⚠️ Otomatik tespit başarısız, Index 0 zorla Binary olarak atanıyor.")
+        b_model = layers[0]
+        
+    if m_model is None and len(layers) >= 2:
+        st.warning("⚠️ Otomatik tespit başarısız, Index 1 zorla Multiclass olarak atanıyor.")
+        m_model = layers[1]
+
+    if b_model is None or m_model is None:
+        st.error("❌ Kritik Hata: Model parçaları ayrıştırılamadı. Lütfen yukarıdaki DEBUG listesini kontrol edin.")
         return None
-    if m_model is None:
-        st.error("Model yüklendi ama 'Multiclass' (7 sınıflı) parça bulunamadı.")
+
+    # --- TAHMİN ---
+    try:
+        # Binary Tahmin
+        b_preds = b_model(img_arr, training=False).numpy()[0]
+        
+        # Çıktı 1 tane ise (Sigmoid) -> [1-p, p] yap
+        if len(b_preds) == 1:
+            harmful_prob = float(b_preds[0])
+            healthy_prob = 1.0 - harmful_prob
+        else: # Çıktı 2 tane ise (Softmax) -> [p0, p1]
+            harmful_prob = float(b_preds[1])
+            healthy_prob = float(b_preds[0]) # veya 1-harmful
+
+        # Multi Tahmin
+        m_preds = m_model(img_arr, training=False).numpy()[0]
+    
+    except Exception as e:
+        st.error(f"Tahmin sırasında hata oluştu: {e}")
         return None
 
-    # TAHMİN
-    binary_preds = b_model(img_arr, training=False).numpy()[0]
-    multi_preds = m_model(img_arr, training=False).numpy()[0]
-
-    # Olasılıkları İşle
-    harmful_prob = float(binary_preds[1])
-    healthy_prob = 1.0 - harmful_prob
-
+    # --- SONUÇ HAZIRLAMA ---
     class_probs = {}
-    if len(multi_preds) == len(CLASS_NAMES_LOWER):
-        class_probs = {CLASS_NAMES_LOWER[i]: float(multi_preds[i]) for i in range(len(CLASS_NAMES_LOWER))}
+    if len(m_preds) == len(CLASS_NAMES_LOWER):
+        class_probs = {CLASS_NAMES_LOWER[i]: float(m_preds[i]) for i in range(len(CLASS_NAMES_LOWER))}
     else:
-        class_probs = {str(i): float(multi_preds[i]) for i in range(len(multi_preds))}
+        class_probs = {str(i): float(m_preds[i]) for i in range(len(m_preds))}
 
     if healthy_prob >= healthy_threshold:
         return {"status": "Healthy", "healthy_probability": healthy_prob, "harmful_probability": harmful_prob, "detailed_class": "healthy", "detailed_prob": healthy_prob, "systemic": None, "class_probs": class_probs}
@@ -151,12 +175,14 @@ def predict_pipeline(img_arr, healthy_threshold):
     SYSTEMIC_RISKS = {
         "psoriasis": {"Psoriatik artrit": 0.40, "Metabolik sendrom": 0.15},
         "clubbing": {"Akciğer hastalığı": 0.50, "Kardiyovasküler": 0.15},
-        "pitting": {"Sedef": 0.75, "Egzama": 0.15}
+        "pitting": {"Sedef": 0.75, "Egzama": 0.15},
+        "onychomycosis": {"Diyabet": 0.25},
+        "blue_finger": {"Siyanoz": 0.45},
+        "acral_lentiginous_melanoma": {"Risk": 0.30}
     }
     systemic_results = {k: best_prob * v for k, v in SYSTEMIC_RISKS.get(best_class, {}).items()}
 
     return {"status": "Harmful", "healthy_probability": healthy_prob, "harmful_probability": harmful_prob, "detailed_class": best_class, "detailed_prob": best_prob, "systemic": systemic_results, "class_probs": class_probs}
-
 # --------------------------------------------------------
 # 5. Arayüz
 # --------------------------------------------------------
